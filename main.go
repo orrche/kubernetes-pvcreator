@@ -36,6 +36,11 @@ type PersistentVolume struct {
 		Local struct {
 			Path string `json:"path"`
 		} `json:"local"`
+		ClaimRef struct {
+			Name      string `json:"name"`
+			Namespace string `json:"namespace"`
+			Kind      string `json:"kind"`
+		}
 	} `json:"spec"`
 
 	Status struct {
