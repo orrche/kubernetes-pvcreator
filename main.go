@@ -4,13 +4,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
 	"time"
 
 	"github.com/google/uuid"
+	"gopkg.in/yaml.v2"
 )
+
+type Config struct {
+	RootPath string `yaml:"RootPath"`
+	Nodes    []struct {
+		Hostname string `yaml:"Hostname"` // Hostname whatever the node is named in kubernetes
+		Host     string `yaml:"Host"`     // Host whatever the node is reached at with ssh
+	} `yaml:"Nodes"`
+}
 
 type Item struct {
 	Kind     string `json:"kind"`
@@ -112,7 +122,7 @@ func startsWith(a, b string) bool {
 }
 func deletePv(pv PersistentVolume) {
 
-	if startsWith(pv.Spec.Local.Path, "/mnt/pool/") {
+	if startsWith(pv.Spec.Local.Path, config.RootPath) {
 		fmt.Printf(":: %s[%s] - %s\n", pv.MetaData.Name, pv.MetaData.Labels["source"], pv.Status.Phase)
 		cmd := exec.Command("ssh", "root@192.168.0.214", "kubectl", "delete", "pv", pv.MetaData.Name)
 		cmd.Start()
@@ -181,13 +191,13 @@ spec:
 				continue
 			}
 			guid := uuid.New()
-			path := fmt.Sprintf("/mnt/pool/%s", guid)
-			cmd := exec.Command("ssh", "root@192.168.0.214", "test", "-d", "/mnt/pool/dump/"+item.Spec.Selector.MatchLabels.Source)
+			path := fmt.Sprintf("%s/%s", config.RootPath, guid)
+			cmd := exec.Command("ssh", "root@192.168.0.214", "test", "-d", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels.Source)
 			_, err := cmd.CombinedOutput()
 			if err != nil {
 				continue
 			}
-			cmd = exec.Command("ssh", "root@192.168.0.214", "cp", "-rp", "--reflink=always", "/mnt/pool/dump/"+item.Spec.Selector.MatchLabels.Source, path)
+			cmd = exec.Command("ssh", "root@192.168.0.214", "cp", "-rp", "--reflink=always", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels.Source, path)
 			_, err = cmd.CombinedOutput()
 			if err != nil {
 				log.Panic(err)
@@ -230,7 +240,18 @@ spec:
 
 }
 
+var config Config
+
 func main() {
+	yamlFile, err := ioutil.ReadFile("conf.yaml")
+	if err != nil {
+		log.Panic(err)
+	}
+	err = yaml.Unmarshal(yamlFile, &config)
+	if err != nil {
+		log.Panic(err)
+	}
+
 	for {
 		time.Sleep(10 * time.Second)
 		process()
