@@ -88,7 +88,7 @@ func getPvc() []Item {
 }
 
 func getPv() []PersistentVolume {
-	cmd := exec.Command("ssh", "root@192.168.0.214", "kubectl", "get", "pv", "-o", "json")
+	cmd := exec.Command("kubectl", "get", "pv", "-o", "json")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		log.Fatal(err)
@@ -124,7 +124,7 @@ func deletePv(pv PersistentVolume) {
 
 	if startsWith(pv.Spec.Local.Path, config.RootPath) {
 		fmt.Printf(":: %s[%s] - %s\n", pv.MetaData.Name, pv.MetaData.Labels["source"], pv.Status.Phase)
-		cmd := exec.Command("ssh", "root@192.168.0.214", "kubectl", "delete", "pv", pv.MetaData.Name)
+		cmd := exec.Command("kubectl", "delete", "pv", pv.MetaData.Name)
 		cmd.Start()
 		cmd.Wait()
 
@@ -212,7 +212,7 @@ spec:
 			if len(hosts) == 0 {
 				continue
 			}
-			cmd := exec.Command("ssh", "root@192.168.0.214", "kubectl", "apply", "-f", "-")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			stdin, err := cmd.StdinPipe()
 
 			go func() {
