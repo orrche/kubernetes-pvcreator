@@ -145,7 +145,7 @@ spec:
   persistentVolumeReclaimPolicy: Delete
   storageClassName: manual
   claimRef:
-    name: wrong{{ .PVC }}
+    name: {{ .PVC }}
     namespace: {{ .Namespace }}
   local:
     path: {{ .Path }}
