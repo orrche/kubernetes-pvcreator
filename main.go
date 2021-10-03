@@ -128,9 +128,11 @@ func deletePv(pv PersistentVolume) {
 		cmd.Start()
 		cmd.Wait()
 
-		cmd = exec.Command("ssh", "root@192.168.0.214", "rm", "-rf", pv.Spec.Local.Path)
-		cmd.Start()
-		cmd.Wait()
+		for _, server := range config.Nodes {
+			cmd = exec.Command("ssh", "root@"+server.Host, "rm", "-rf", pv.Spec.Local.Path)
+			cmd.Start()
+			cmd.Wait()
+		}
 	}
 }
 
@@ -192,17 +194,25 @@ spec:
 			}
 			guid := uuid.New()
 			path := fmt.Sprintf("%s/%s", config.RootPath, guid)
-			cmd := exec.Command("ssh", "root@192.168.0.214", "test", "-d", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels.Source)
-			_, err := cmd.CombinedOutput()
-			if err != nil {
+
+			hosts := []string{}
+			for _, node := range config.Nodes {
+				cmd := exec.Command("ssh", "root@"+node.Host, "test", "-d", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels.Source)
+				_, err := cmd.CombinedOutput()
+				if err != nil {
+					continue
+				}
+				cmd = exec.Command("ssh", "root@"+node.Host, "cp", "-rp", "--reflink=always", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels.Source, path)
+				_, err = cmd.CombinedOutput()
+				if err != nil {
+					log.Panic(err)
+				}
+				hosts = append(hosts, node.Hostname)
+			}
+			if len(hosts) == 0 {
 				continue
 			}
-			cmd = exec.Command("ssh", "root@192.168.0.214", "cp", "-rp", "--reflink=always", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels.Source, path)
-			_, err = cmd.CombinedOutput()
-			if err != nil {
-				log.Panic(err)
-			}
-			cmd = exec.Command("ssh", "root@192.168.0.214", "kubectl", "apply", "-f", "-")
+			cmd := exec.Command("ssh", "root@192.168.0.214", "kubectl", "apply", "-f", "-")
 			stdin, err := cmd.StdinPipe()
 
 			go func() {
