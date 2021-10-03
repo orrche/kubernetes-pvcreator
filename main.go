@@ -121,8 +121,6 @@ func deletePv(pv PersistentVolume) {
 		cmd = exec.Command("ssh", "root@192.168.0.214", "rm", "-rf", pv.Spec.Local.Path)
 		cmd.Start()
 		cmd.Wait()
-	} else {
-		fmt.Println(pv.Spec.Local.Path)
 	}
 }
 
