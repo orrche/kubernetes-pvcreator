@@ -183,8 +183,13 @@ spec:
 			}
 			guid := uuid.New()
 			path := fmt.Sprintf("/mnt/pool/%s", guid)
-			cmd := exec.Command("ssh", "root@192.168.0.214", "cp", "-rp", "--reflink=always", "/mnt/pool/dump/"+item.Spec.Selector.MatchLabels.Source, path)
+			cmd := exec.Command("ssh", "root@192.168.0.214", "test", "-d", "/mnt/pool/dump/"+item.Spec.Selector.MatchLabels.Source)
 			_, err := cmd.CombinedOutput()
+			if err != nil {
+				continue
+			}
+			cmd = exec.Command("ssh", "root@192.168.0.214", "cp", "-rp", "--reflink=always", "/mnt/pool/dump/"+item.Spec.Selector.MatchLabels.Source, path)
+			_, err = cmd.CombinedOutput()
 			if err != nil {
 				log.Panic(err)
 			}
