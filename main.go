@@ -170,6 +170,17 @@ spec:
 		if item.Status.Phase == "Pending" {
 			fmt.Printf("  :: %s\n", item.MetaData.Name)
 			fmt.Printf("  :: %s\n", item.Spec.Selector.MatchLabels.Source)
+			created := false
+			for _, pv := range pvs {
+				if item.MetaData.Namespace == pv.Spec.ClaimRef.Namespace &&
+					item.MetaData.Name == pv.Spec.ClaimRef.Name {
+					fmt.Println("This one is already created")
+					created = true
+				}
+			}
+			if created {
+				continue
+			}
 			guid := uuid.New()
 			path := fmt.Sprintf("/mnt/pool/%s", guid)
 			cmd := exec.Command("ssh", "root@192.168.0.214", "cp", "-rp", "--reflink=always", "/mnt/pool/dump/"+item.Spec.Selector.MatchLabels.Source, path)
