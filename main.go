@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -125,7 +126,7 @@ func deletePv(pv PersistentVolume) {
 	}
 }
 
-func main() {
+func process() {
 	pvs := getPv()
 
 	for _, pv := range pvs {
@@ -229,4 +230,11 @@ spec:
 		}
 	}
 
+}
+
+func main() {
+	for {
+		time.Sleep(10 * time.Second)
+		process()
+	}
 }
