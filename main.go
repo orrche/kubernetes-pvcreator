@@ -65,7 +65,7 @@ type PersistentVolume struct {
 }
 
 func getPvc() []Item {
-	cmd := exec.Command("kubectl", "get", "pvc", "-o", "json")
+	cmd := exec.Command("kubectl", "get", "pvc", "-A", "-o", "json")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		log.Fatal(err)
