@@ -11,12 +11,8 @@ metadata:
   name: kubernetes-pvcreator-controller
 rules:
 - apiGroups: [""] # "" indicates the core API group
-  resources: ["namespaces", "persistentvolumes", "persistentvolumeclaims"]
+  resources: ["persistentvolumes", "persistentvolumeclaims"]
   verbs: ["get", "watch", "list", "create", "delete"]
-- apiGroups: ["storage.k8s.io"]
-  resources:
-  - storageclasses
-  verbs: ["list", "watch"]
 
 ---
 
