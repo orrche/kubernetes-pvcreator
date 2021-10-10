@@ -1,0 +1,75 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  namespace: pvcreator
+  name: kubernetes-pvcreator-controller
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubernetes-pvcreator-controller
+rules:
+- apiGroups: [""] # "" indicates the core API group
+  resources: ["namespaces", "persistentvolumes", "persistentvolumeclaims"]
+  verbs: ["get", "watch", "list", "create", "delete"]
+- apiGroups: ["storage.k8s.io"]
+  resources:
+  - storageclasses
+  verbs: ["list", "watch"]
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubernetes-pvcreator-controller
+subjects:
+- kind: ServiceAccount
+  namespace: pvcreator
+  name: kubernetes-pvcreator-controller # Name is case sensitive
+roleRef:
+  kind: ClusterRole
+  name: kubernetes-pvcreator-controller
+  apiGroup: rbac.authorization.k8s.io
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pvcreator
+  namespace: pvcreator
+spec:
+  selector:
+    matchLabels:
+      app: pvcreator
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: pvcreator
+    spec:
+      serviceAccountName: kubernetes-pvcreator-controller
+      containers:
+      - name: pvcreator-master
+        image: registry-snapshot.c.dockerutv12.tuv.jordbruksverket.se/kubernetes-pvcreator:0.1
+        imagePullPolicy: Always
+        volumeMounts:
+        - mountPath: "/home/pvcreator/.ssh/"
+          name: ssh-key
+          readOnly: true
+        - mountPath: "/home/pvcreator/conf.yml"
+          name: pvcreator-conf
+          readOnly: true
+      volumes:
+      - name: ssh-key
+        secret:
+          secretName: ssh-key
+      - name: pvcreator-conf
+        configMap:
+          name: pvcreator-config
+          items:
+          - key: "conf.yml"
+            path: "conf.yml"
