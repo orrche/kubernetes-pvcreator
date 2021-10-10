@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pvtester
+spec:
+  containers:
+  - name: pvtester
+    image: registry-snapshot.c.dockerutv12.tuv.jordbruksverket.se/library/centos:centos7
+    command: ["sleep"]
+    args: ["1h"]
+    volumeMounts:
+    - name: volv
+      mountPath: /data
+  volumes:
+  - name: volv
+    persistentVolumeClaim:
+      claimName: pvtester-pvc
+
+  restartPolicy: OnFailure
+
+---
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvtester-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: manual
+  selector:
+          matchLabels:
+                  source: xfs-website-2021-10-03
+  resources:
+    requests:
+      storage: 2Gi
+
+
