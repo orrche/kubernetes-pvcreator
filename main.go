@@ -205,7 +205,8 @@ spec:
 				cmd = exec.Command("ssh", node.Host, "sudo", "cp", "-rp", "--reflink=always", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels.Source, path)
 				_, err = cmd.CombinedOutput()
 				if err != nil {
-					log.Panic(err)
+					log.Println("Failed command: ", "ssh", node.Host, "sudo", "cp", "-rp", "--reflink=always", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels.Source, path)
+					continue
 				}
 				hosts = append(hosts, node.Hostname)
 			}
