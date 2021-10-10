@@ -129,7 +129,7 @@ func deletePv(pv PersistentVolume) {
 		cmd.Wait()
 
 		for _, server := range config.Nodes {
-			cmd = exec.Command("ssh", "root@"+server.Host, "rm", "-rf", pv.Spec.Local.Path)
+			cmd = exec.Command("ssh", server.Host, "sudo", "rm", "-rf", pv.Spec.Local.Path)
 			cmd.Start()
 			cmd.Wait()
 		}
@@ -197,12 +197,12 @@ spec:
 
 			hosts := []string{}
 			for _, node := range config.Nodes {
-				cmd := exec.Command("ssh", "root@"+node.Host, "test", "-d", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels.Source)
+				cmd := exec.Command("ssh", node.Host, "test", "-d", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels.Source)
 				_, err := cmd.CombinedOutput()
 				if err != nil {
 					continue
 				}
-				cmd = exec.Command("ssh", "root@"+node.Host, "cp", "-rp", "--reflink=always", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels.Source, path)
+				cmd = exec.Command("ssh", node.Host, "sudo", "cp", "-rp", "--reflink=always", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels.Source, path)
 				_, err = cmd.CombinedOutput()
 				if err != nil {
 					log.Panic(err)
