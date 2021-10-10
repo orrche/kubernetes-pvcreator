@@ -89,16 +89,14 @@ func startsWith(a, b string) bool {
 	}
 	return false
 }
-func deletePv(pv v1.PersistentVolume) {
+func deletePv(clientset *kubernetes.Clientset, pv v1.PersistentVolume) {
 
 	if startsWith(pv.Spec.Local.Path, config.RootPath) {
 		fmt.Printf(":: %s[%s] - %s\n", pv.ObjectMeta.Name, pv.ObjectMeta.Labels["source"], pv.Status.Phase)
-		cmd := exec.Command("kubectl", "delete", "pv", pv.ObjectMeta.Name)
-		cmd.Start()
-		cmd.Wait()
+		clientset.CoreV1().PersistentVolumes().Delete(context.TODO(), pv.ObjectMeta.Name, metav1.DeleteOptions{})
 
 		for _, server := range config.Nodes {
-			cmd = exec.Command("ssh", server.Host, "sudo", "rm", "-rf", pv.Spec.Local.Path)
+			cmd := exec.Command("ssh", server.Host, "sudo", "rm", "-rf", pv.Spec.Local.Path)
 			cmd.Start()
 			cmd.Wait()
 		}
@@ -110,7 +108,7 @@ func process(clientset *kubernetes.Clientset) {
 
 	for _, pv := range pvs {
 		if pv.Status.Phase == "Failed" {
-			deletePv(pv)
+			deletePv(clientset, pv)
 		}
 	}
 
