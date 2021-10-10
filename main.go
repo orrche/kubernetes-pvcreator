@@ -144,7 +144,7 @@ func process(clientset *kubernetes.Clientset) {
 				},
 			}
 			pv.Spec.Capacity = v1.ResourceList{
-				v1.ResourceName(v1.ResourceStorage): *resource.NewQuantity(int64(3000000000), resource.BinarySI),
+				v1.ResourceName(v1.ResourceStorage): *resource.NewQuantity(int64(3000000000000), resource.BinarySI),
 			}
 
 			pv.Spec.AccessModes = []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}
