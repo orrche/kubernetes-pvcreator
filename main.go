@@ -1,22 +1,29 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"io/ioutil"
 	"log"
-	"os"
 	"os/exec"
 	"time"
 
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v2"
+	v1 "k8s.io/api/core/v1"
+
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type Config struct {
-	RootPath string `yaml:"RootPath"`
-	Nodes    []struct {
+	RootPath     string `yaml:"RootPath"`
+	StorageClass string `yaml:"StorageClass"`
+	Nodes        []struct {
 		Hostname string `yaml:"Hostname"` // Hostname whatever the node is named in kubernetes
 		Host     string `yaml:"Host"`     // Host whatever the node is reached at with ssh
 	} `yaml:"Nodes"`
@@ -136,7 +143,7 @@ func deletePv(pv PersistentVolume) {
 	}
 }
 
-func process() {
+func process(clientset *kubernetes.Clientset) {
 	pvs := getPv()
 
 	for _, pv := range pvs {
@@ -145,37 +152,6 @@ func process() {
 		}
 	}
 
-	pvTemplate := `
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: {{ .GUID }}
-  labels:
-    source: {{ .Selector }}
-spec:
-  capacity:
-    storage: 100Gi
-  volumeMode: Filesystem
-  accessModes:
-  - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Delete
-  storageClassName: manual
-  claimRef:
-    name: {{ .PVC }}
-    namespace: {{ .Namespace }}
-  local:
-    path: {{ .Path }}
-  nodeAffinity:
-          required:
-                  nodeSelectorTerms:
-                          - matchExpressions:
-                                  - key: kubernetes.io/hostname
-                                    operator: In
-                                    values:
-                                            - {{ .Hostname }}
-`
-
-	templ := template.Must(template.New("pv").Parse(pvTemplate))
 	items := getPvc()
 	for _, item := range items {
 		if item.Status.Phase == "Pending" {
@@ -213,39 +189,44 @@ spec:
 			if len(hosts) == 0 {
 				continue
 			}
-			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			stdin, err := cmd.StdinPipe()
 
-			go func() {
-				defer stdin.Close()
-				var data struct {
-					Path      string
-					Selector  string
-					Hostname  string
-					GUID      string
-					Namespace string
-					PVC       string
-				}
-
-				data.Path = path
-				data.Selector = item.Spec.Selector.MatchLabels.Source
-				data.Hostname = hosts[0]
-				data.GUID = guid.String()
-				data.Namespace = item.MetaData.Namespace
-				data.PVC = item.MetaData.Name
-				templ.Execute(os.Stdout, data)
-				err := templ.Execute(stdin, data)
-				if err != nil {
-					log.Panic(err)
-				}
-			}()
-
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				log.Panic(err)
+			pv := v1.PersistentVolume{}
+			volumeFile := v1.PersistentVolumeFilesystem
+			pv.Spec.VolumeMode = &volumeFile
+			pv.ObjectMeta = metav1.ObjectMeta{
+				Name: guid.String(),
+				Labels: map[string]string{
+					"source": item.Spec.Selector.MatchLabels.Source,
+				},
+			}
+			pv.Spec.Capacity = v1.ResourceList{
+				v1.ResourceName(v1.ResourceStorage): *resource.NewQuantity(int64(3000000000), resource.BinarySI),
 			}
 
-			fmt.Printf("%s\n", out)
+			pv.Spec.AccessModes = []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}
+			pv.Spec.PersistentVolumeReclaimPolicy = v1.PersistentVolumeReclaimDelete
+			pv.Spec.StorageClassName = config.StorageClass
+			pv.Spec.ClaimRef = &v1.ObjectReference{
+				Name:      item.MetaData.Name,
+				Namespace: item.MetaData.Namespace,
+			}
+			pv.Spec.Local = &v1.LocalVolumeSource{
+				Path: path,
+			}
+			pv.Spec.NodeAffinity = &v1.VolumeNodeAffinity{
+				Required: &v1.NodeSelector{},
+			}
+
+			pv.Spec.NodeAffinity.Required.NodeSelectorTerms = append(pv.Spec.NodeAffinity.Required.NodeSelectorTerms,
+				v1.NodeSelectorTerm{
+					MatchExpressions: []v1.NodeSelectorRequirement{
+						{Key: "kubernetes.io/hostname", Operator: "In", Values: hosts},
+					},
+				})
+			_, err := clientset.CoreV1().PersistentVolumes().Create(context.TODO(), &pv, metav1.CreateOptions{})
+			if err != nil {
+				log.Print(err)
+			}
 		}
 	}
 
@@ -254,6 +235,16 @@ spec:
 var config Config
 
 func main() {
+	kConfig, err := rest.InClusterConfig()
+	if err != nil {
+		log.Panic(err)
+	}
+
+	clientset, err := kubernetes.NewForConfig(kConfig)
+	if err != nil {
+		log.Panic(err)
+	}
+
 	yamlFile, err := ioutil.ReadFile("conf.yml")
 	if err != nil {
 		log.Panic(err)
@@ -265,6 +256,6 @@ func main() {
 
 	for {
 		time.Sleep(10 * time.Second)
-		process()
+		process(clientset)
 	}
 }
