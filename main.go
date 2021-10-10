@@ -49,28 +49,6 @@ type Item struct {
 	}
 }
 
-type PersistentVolume struct {
-	Spec struct {
-		Local struct {
-			Path string `json:"path"`
-		} `json:"local"`
-		ClaimRef struct {
-			Name      string `json:"name"`
-			Namespace string `json:"namespace"`
-			Kind      string `json:"kind"`
-		}
-	} `json:"spec"`
-
-	Status struct {
-		Phase string `json:"phase"`
-	} `json:"status"`
-
-	MetaData struct {
-		Name   string            `json:"name"`
-		Labels map[string]string `json:"labels"`
-	} `json:"metadata"`
-}
-
 func getPvc() []Item {
 	cmd := exec.Command("kubectl", "get", "pvc", "-A", "-o", "json")
 	stdout, err := cmd.StdoutPipe()
@@ -94,28 +72,12 @@ func getPvc() []Item {
 	return response.Items
 }
 
-func getPv() []PersistentVolume {
-	cmd := exec.Command("kubectl", "get", "pv", "-o", "json")
-	stdout, err := cmd.StdoutPipe()
+func getPv(clientset *kubernetes.Clientset) []v1.PersistentVolume {
+	pv, err := clientset.CoreV1().PersistentVolumes().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
-		log.Fatal(err)
+		log.Print(err)
 	}
-	if err := cmd.Start(); err != nil {
-		log.Fatal(err)
-	}
-	var response struct {
-		APIVersion string `json:"apiVersion"`
-
-		Items []PersistentVolume `json:"items"`
-	}
-	if err := json.NewDecoder(stdout).Decode(&response); err != nil {
-		log.Fatal(err)
-	}
-	if err := cmd.Wait(); err != nil {
-		log.Fatal(err)
-	}
-
-	return response.Items
+	return pv.Items
 }
 
 func startsWith(a, b string) bool {
@@ -127,11 +89,11 @@ func startsWith(a, b string) bool {
 	}
 	return false
 }
-func deletePv(pv PersistentVolume) {
+func deletePv(pv v1.PersistentVolume) {
 
 	if startsWith(pv.Spec.Local.Path, config.RootPath) {
-		fmt.Printf(":: %s[%s] - %s\n", pv.MetaData.Name, pv.MetaData.Labels["source"], pv.Status.Phase)
-		cmd := exec.Command("kubectl", "delete", "pv", pv.MetaData.Name)
+		fmt.Printf(":: %s[%s] - %s\n", pv.ObjectMeta.Name, pv.ObjectMeta.Labels["source"], pv.Status.Phase)
+		cmd := exec.Command("kubectl", "delete", "pv", pv.ObjectMeta.Name)
 		cmd.Start()
 		cmd.Wait()
 
@@ -144,7 +106,7 @@ func deletePv(pv PersistentVolume) {
 }
 
 func process(clientset *kubernetes.Clientset) {
-	pvs := getPv()
+	pvs := getPv(clientset)
 
 	for _, pv := range pvs {
 		if pv.Status.Phase == "Failed" {
