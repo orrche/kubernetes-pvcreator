@@ -228,7 +228,7 @@ spec:
 
 				data.Path = path
 				data.Selector = item.Spec.Selector.MatchLabels.Source
-				data.Hostname = "localhost.localdomain"
+				data.Hostname = hosts[0]
 				data.GUID = guid.String()
 				data.Namespace = item.MetaData.Namespace
 				data.PVC = item.MetaData.Name
