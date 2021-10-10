@@ -253,7 +253,7 @@ spec:
 var config Config
 
 func main() {
-	yamlFile, err := ioutil.ReadFile("conf.yaml")
+	yamlFile, err := ioutil.ReadFile("conf.yml")
 	if err != nil {
 		log.Panic(err)
 	}
