@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -49,27 +48,12 @@ type Item struct {
 	}
 }
 
-func getPvc() []Item {
-	cmd := exec.Command("kubectl", "get", "pvc", "-A", "-o", "json")
-	stdout, err := cmd.StdoutPipe()
+func getPvc(clientset *kubernetes.Clientset) []v1.PersistentVolumeClaim {
+	pvc, err := clientset.CoreV1().PersistentVolumeClaims("").List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
-		log.Fatal(err)
+		log.Print(err)
 	}
-	if err := cmd.Start(); err != nil {
-		log.Fatal(err)
-	}
-	var response struct {
-		APIVersion string `json:"apiVersion"`
-
-		Items []Item `json:"items"`
-	}
-	if err := json.NewDecoder(stdout).Decode(&response); err != nil {
-		log.Fatal(err)
-	}
-	if err := cmd.Wait(); err != nil {
-		log.Fatal(err)
-	}
-	return response.Items
+	return pvc.Items
 }
 
 func getPv(clientset *kubernetes.Clientset) []v1.PersistentVolume {
@@ -112,15 +96,15 @@ func process(clientset *kubernetes.Clientset) {
 		}
 	}
 
-	items := getPvc()
+	items := getPvc(clientset)
 	for _, item := range items {
 		if item.Status.Phase == "Pending" {
-			fmt.Printf("  :: %s\n", item.MetaData.Name)
-			fmt.Printf("  :: %s\n", item.Spec.Selector.MatchLabels.Source)
+			fmt.Printf("  :: %s\n", item.ObjectMeta.Name)
+			fmt.Printf("  :: %s\n", item.Spec.Selector.MatchLabels["source"])
 			created := false
 			for _, pv := range pvs {
-				if item.MetaData.Namespace == pv.Spec.ClaimRef.Namespace &&
-					item.MetaData.Name == pv.Spec.ClaimRef.Name {
+				if item.ObjectMeta.Namespace == pv.Spec.ClaimRef.Namespace &&
+					item.ObjectMeta.Name == pv.Spec.ClaimRef.Name {
 					fmt.Println("This one is already created")
 					created = true
 				}
@@ -133,15 +117,15 @@ func process(clientset *kubernetes.Clientset) {
 
 			hosts := []string{}
 			for _, node := range config.Nodes {
-				cmd := exec.Command("ssh", node.Host, "test", "-d", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels.Source)
+				cmd := exec.Command("ssh", node.Host, "test", "-d", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels["source"])
 				_, err := cmd.CombinedOutput()
 				if err != nil {
 					continue
 				}
-				cmd = exec.Command("ssh", node.Host, "sudo", "cp", "-rp", "--reflink=always", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels.Source, path)
+				cmd = exec.Command("ssh", node.Host, "sudo", "cp", "-rp", "--reflink=always", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels["source"], path)
 				_, err = cmd.CombinedOutput()
 				if err != nil {
-					log.Println("Failed command: ", "ssh", node.Host, "sudo", "cp", "-rp", "--reflink=always", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels.Source, path)
+					log.Println("Failed command: ", "ssh", node.Host, "sudo", "cp", "-rp", "--reflink=always", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels["source"], path)
 					continue
 				}
 				hosts = append(hosts, node.Hostname)
@@ -156,7 +140,7 @@ func process(clientset *kubernetes.Clientset) {
 			pv.ObjectMeta = metav1.ObjectMeta{
 				Name: guid.String(),
 				Labels: map[string]string{
-					"source": item.Spec.Selector.MatchLabels.Source,
+					"source": item.Spec.Selector.MatchLabels["source"],
 				},
 			}
 			pv.Spec.Capacity = v1.ResourceList{
@@ -167,8 +151,8 @@ func process(clientset *kubernetes.Clientset) {
 			pv.Spec.PersistentVolumeReclaimPolicy = v1.PersistentVolumeReclaimDelete
 			pv.Spec.StorageClassName = config.StorageClass
 			pv.Spec.ClaimRef = &v1.ObjectReference{
-				Name:      item.MetaData.Name,
-				Namespace: item.MetaData.Namespace,
+				Name:      item.ObjectMeta.Name,
+				Namespace: item.ObjectMeta.Namespace,
 			}
 			pv.Spec.Local = &v1.LocalVolumeSource{
 				Path: path,
