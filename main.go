@@ -100,7 +100,14 @@ func process(clientset *kubernetes.Clientset) {
 	for _, item := range items {
 		if item.Status.Phase == "Pending" {
 			fmt.Printf("  :: %s\n", item.ObjectMeta.Name)
-			fmt.Printf("  :: %s\n", item.Spec.Selector.MatchLabels["source"])
+			if item.Spec.Selector == nil {
+				continue
+			}
+			source, ok := item.Spec.Selector.MatchLabels["source"]
+			if !ok {
+				continue
+			}
+			fmt.Printf("  :: %s\n", source)
 			created := false
 			for _, pv := range pvs {
 				if item.ObjectMeta.Namespace == pv.Spec.ClaimRef.Namespace &&
