@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -46,6 +49,11 @@ type Item struct {
 	Status struct {
 		Phase string `json:"phase"`
 	}
+}
+
+type Dump struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
 }
 
 func getPvc(clientset *kubernetes.Clientset) []v1.PersistentVolumeClaim {
@@ -183,6 +191,74 @@ func process(clientset *kubernetes.Clientset) {
 
 }
 
+func dumps() ([]Dump, error) {
+	dump := []Dump{}
+
+	for _, node := range config.Nodes {
+		cmd := exec.Command("ssh", node.Host, "ls", config.RootPath+"/dump/")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			continue
+		}
+
+		for _, folder := range strings.Split(string(output), "\n") {
+			log.Print(folder)
+			d := Dump{}
+			d.Name = folder
+			d.Type = "unknown"
+
+			cmd := exec.Command("ssh", node.Host, "cat", config.RootPath+"/dump/"+folder+".meta")
+			metaInfo, err := cmd.CombinedOutput()
+			if err != nil {
+				continue
+			}
+
+			type dumpMeta struct {
+				Type string `json:"type"`
+			}
+
+			dm := dumpMeta{}
+			json.Unmarshal(metaInfo, &dm)
+
+			d.Type = dm.Type
+
+			dump = append(dump, d)
+		}
+	}
+	return dump, nil
+}
+
+func getDumpsJSON(w http.ResponseWriter, r *http.Request) {
+
+	type Result struct {
+		Dumps []Dump `json:"dumps"`
+	}
+
+	res := Result{}
+	var err error
+	res.Dumps, err = dumps()
+	if err != nil {
+		panic(err)
+	}
+
+	b, err := json.Marshal(res)
+	if err != nil {
+		panic(err)
+	}
+
+	w.Write(b)
+}
+
+func getDumpsCSV(w http.ResponseWriter, r *http.Request) {
+	dumps, err := dumps()
+	if err != nil {
+		panic(err)
+	}
+	for _, dump := range dumps {
+		fmt.Fprintf(w, "%s,%s\n", dump.Name, dump.Type)
+	}
+}
+
 var config Config
 
 func main() {
@@ -205,7 +281,15 @@ func main() {
 		log.Panic(err)
 	}
 
-	for {
+	cont := true
+	go func() {
+		http.HandleFunc("/getDumps.json", getDumpsJSON)
+		http.HandleFunc("/getDumps.csv", getDumpsCSV)
+		http.ListenAndServe(":8080", nil)
+		cont = false
+	}()
+
+	for cont {
 		time.Sleep(10 * time.Second)
 		process(clientset)
 	}
