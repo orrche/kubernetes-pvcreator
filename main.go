@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,11 +28,8 @@ import (
 
 type Config struct {
 	RootPath     string `yaml:"RootPath"`
+	SnapshotPath string `yaml:"SnapshotPath"`
 	StorageClass string `yaml:"StorageClass"`
-	Nodes        []struct {
-		Hostname string `yaml:"Hostname"` // Hostname whatever the node is named in kubernetes
-		Host     string `yaml:"Host"`     // Host whatever the node is reached at with ssh
-	} `yaml:"Nodes"`
 }
 
 type Item struct {
@@ -64,6 +65,11 @@ func getPvc(clientset *kubernetes.Clientset) []v1.PersistentVolumeClaim {
 	return pvc.Items
 }
 
+func getVolumeSnapshots(clientset *kubernetes.Clientset) {
+
+	// vs, err := clientset
+}
+
 func getPv(clientset *kubernetes.Clientset) []v1.PersistentVolume {
 	pv, err := clientset.CoreV1().PersistentVolumes().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
@@ -87,11 +93,9 @@ func deletePv(clientset *kubernetes.Clientset, pv v1.PersistentVolume) {
 		fmt.Printf(":: %s[%s] - %s\n", pv.ObjectMeta.Name, pv.ObjectMeta.Labels["source"], pv.Status.Phase)
 		clientset.CoreV1().PersistentVolumes().Delete(context.TODO(), pv.ObjectMeta.Name, metav1.DeleteOptions{})
 
-		for _, server := range config.Nodes {
-			cmd := exec.Command("ssh", server.Host, "sudo", "rm", "-rf", pv.Spec.Local.Path)
-			cmd.Start()
-			cmd.Wait()
-		}
+		cmd := exec.Command("rm", "-rf", pv.Spec.Local.Path)
+		cmd.Start()
+		cmd.Wait()
 	}
 }
 
@@ -106,18 +110,22 @@ func process(clientset *kubernetes.Clientset) {
 
 	items := getPvc(clientset)
 	for _, item := range items {
+		if item.Spec.StorageClassName != nil && *item.Spec.StorageClassName != config.StorageClass {
+			continue
+		}
 		if item.Status.Phase == "Pending" {
 			fmt.Printf("  :: %s\n", item.ObjectMeta.Name)
-			if item.Spec.Selector == nil {
+			if item.Spec.DataSource == nil {
 				continue
 			}
-			source, ok := item.Spec.Selector.MatchLabels["source"]
-			if !ok {
-				continue
-			}
+			source := item.Spec.DataSource.Name
 			fmt.Printf("  :: %s\n", source)
 			created := false
 			for _, pv := range pvs {
+				if pv.Spec.ClaimRef == nil {
+					fmt.Printf("Empty claim ref..")
+					continue
+				}
 				if item.ObjectMeta.Namespace == pv.Spec.ClaimRef.Namespace &&
 					item.ObjectMeta.Name == pv.Spec.ClaimRef.Name {
 					fmt.Println("This one is already created")
@@ -128,24 +136,19 @@ func process(clientset *kubernetes.Clientset) {
 				continue
 			}
 			guid := uuid.New()
-			path := fmt.Sprintf("%s/%s", config.RootPath, guid)
+			path := filepath.Join(config.RootPath, guid.String())
+			sourcePath := filepath.Join(config.SnapshotPath, source)
+			fmt.Printf("Source: %s\n", sourcePath)
 
-			hosts := []string{}
-			for _, node := range config.Nodes {
-				cmd := exec.Command("ssh", node.Host, "test", "-d", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels["source"])
-				_, err := cmd.CombinedOutput()
-				if err != nil {
-					continue
-				}
-				cmd = exec.Command("ssh", node.Host, "sudo", "cp", "-rp", "--reflink=always", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels["source"], path)
-				_, err = cmd.CombinedOutput()
-				if err != nil {
-					log.Println("Failed command: ", "ssh", node.Host, "sudo", "cp", "-rp", "--reflink=always", config.RootPath+"/dump/"+item.Spec.Selector.MatchLabels["source"], path)
-					continue
-				}
-				hosts = append(hosts, node.Hostname)
+			cmd := exec.Command("test", "-d", sourcePath)
+			_, err := cmd.CombinedOutput()
+			if err != nil {
+				continue
 			}
-			if len(hosts) == 0 {
+			cmd = exec.Command("cp", "-rp", "--reflink=always", sourcePath, path)
+			_, err = cmd.CombinedOutput()
+			if err != nil {
+				log.Println("Failed command: ", "cp", "-rp", "--reflink=always", sourcePath, path)
 				continue
 			}
 
@@ -155,7 +158,7 @@ func process(clientset *kubernetes.Clientset) {
 			pv.ObjectMeta = metav1.ObjectMeta{
 				Name: guid.String(),
 				Labels: map[string]string{
-					"source": item.Spec.Selector.MatchLabels["source"],
+					"source": source,
 				},
 			}
 			pv.Spec.Capacity = v1.ResourceList{
@@ -179,10 +182,10 @@ func process(clientset *kubernetes.Clientset) {
 			pv.Spec.NodeAffinity.Required.NodeSelectorTerms = append(pv.Spec.NodeAffinity.Required.NodeSelectorTerms,
 				v1.NodeSelectorTerm{
 					MatchExpressions: []v1.NodeSelectorRequirement{
-						{Key: "kubernetes.io/hostname", Operator: "In", Values: hosts},
+						{Key: "kubernetes.io/hostname", Operator: "In", Values: []string{os.Getenv("NODE")}},
 					},
 				})
-			_, err := clientset.CoreV1().PersistentVolumes().Create(context.TODO(), &pv, metav1.CreateOptions{})
+			_, err = clientset.CoreV1().PersistentVolumes().Create(context.TODO(), &pv, metav1.CreateOptions{})
 			if err != nil {
 				log.Print(err)
 			}
@@ -194,37 +197,42 @@ func process(clientset *kubernetes.Clientset) {
 func dumps() ([]Dump, error) {
 	dump := []Dump{}
 
-	for _, node := range config.Nodes {
-		cmd := exec.Command("ssh", node.Host, "ls", config.RootPath+"/dump/")
-		output, err := cmd.CombinedOutput()
+	files, err := ioutil.ReadDir(config.SnapshotPath)
+	if err != nil {
+		panic(err)
+	}
+
+	for _, folder := range files {
+		d := Dump{}
+		d.Name = folder.Name()
+		d.Type = "unknown"
+
+		jsonFile, err := os.Open(config.SnapshotPath + folder.Name() + ".meta")
+		if err != nil {
+			continue
+		}
+		byteValue, err := ioutil.ReadAll(jsonFile)
 		if err != nil {
 			continue
 		}
 
-		for _, folder := range strings.Split(string(output), "\n") {
-			log.Print(folder)
-			d := Dump{}
-			d.Name = folder
-			d.Type = "unknown"
-
-			cmd := exec.Command("ssh", node.Host, "cat", config.RootPath+"/dump/"+folder+".meta")
-			metaInfo, err := cmd.CombinedOutput()
-			if err != nil {
-				continue
-			}
-
-			type dumpMeta struct {
-				Type string `json:"type"`
-			}
-
-			dm := dumpMeta{}
-			json.Unmarshal(metaInfo, &dm)
-
-			d.Type = dm.Type
-
-			dump = append(dump, d)
+		type dumpMeta struct {
+			Type string `json:"type"`
 		}
+
+		dm := dumpMeta{}
+		json.Unmarshal(byteValue, &dm)
+
+		d.Type = dm.Type
+
+		dump = append(dump, d)
 	}
+
+	// Sort by age, keeping original order or equal elements.
+	sort.SliceStable(dump, func(i, j int) bool {
+		return strings.Compare(dump[i].Name, dump[j].Name) == 1
+	})
+
 	return dump, nil
 }
 
@@ -250,12 +258,70 @@ func getDumpsJSON(w http.ResponseWriter, r *http.Request) {
 }
 
 func getDumpsCSV(w http.ResponseWriter, r *http.Request) {
-	dumps, err := dumps()
+	for _, dumpSet := range state.dumps {
+		if dumpSet.incomming.Add(30 * time.Second).After(time.Now()) {
+			for _, dump := range dumpSet.Dumps {
+				fmt.Fprintf(w, "%s,%s\n", dump.Name, dump.Type)
+			}
+		}
+	}
+}
+
+type DumpSet struct {
+	Dumps     []Dump `json:"dumps"`
+	Source    string
+	incomming time.Time
+}
+type State struct {
+	dumps map[string]DumpSet
+}
+
+var state State
+
+func Update(w http.ResponseWriter, r *http.Request) {
+
+	res := DumpSet{}
+
+	err := json.NewDecoder(r.Body).Decode(&res)
 	if err != nil {
 		panic(err)
 	}
-	for _, dump := range dumps {
-		fmt.Fprintf(w, "%s,%s\n", dump.Name, dump.Type)
+
+	for _, d := range res.Dumps {
+		log.Printf("Dump %s reported from %s", d, res.Source)
+		res.incomming = time.Now()
+		uhm := state.dumps
+		uhm[res.Source] = res
+		state.dumps = uhm
+		log.Printf("%+v", state)
+	}
+}
+
+func CleanRunning(clientset *kubernetes.Clientset) {
+	files, err := ioutil.ReadDir(config.RootPath)
+	if err != nil {
+		panic(err)
+	}
+
+	for _, folder := range files {
+		fmt.Println(folder.Name())
+
+		pvs := getPv(clientset)
+
+		activeDump := false
+		for _, pv := range pvs {
+			if pv.Name == folder.Name() {
+				activeDump = true
+			}
+		}
+		if !activeDump {
+			fmt.Printf("%s isnt active and should be deleted\n", folder.Name())
+			// Maybe I should have some grace period thing here for newly created dumps..
+
+			cmd := exec.Command("rm", "-rf", config.RootPath+folder.Name())
+			cmd.Start()
+			cmd.Wait()
+		}
 	}
 }
 
@@ -282,15 +348,35 @@ func main() {
 	}
 
 	cont := true
-	go func() {
+	if os.Getenv("REFLINKMASTER") == "true" {
+		state.dumps = map[string]DumpSet{}
+
 		http.HandleFunc("/getDumps.json", getDumpsJSON)
 		http.HandleFunc("/getDumps.csv", getDumpsCSV)
+		http.HandleFunc("/update", Update)
 		http.ListenAndServe(":8080", nil)
-		cont = false
-	}()
+	} else {
+		for cont {
+			CleanRunning(clientset)
+			time.Sleep(10 * time.Second)
+			process(clientset)
 
-	for cont {
-		time.Sleep(10 * time.Second)
-		process(clientset)
+			d, err := dumps()
+			if err != nil {
+				continue
+			}
+			data := DumpSet{}
+			data.Dumps = d
+			data.Source = os.Getenv("NODE")
+
+			json_data, err := json.Marshal(data)
+			if err != nil {
+				continue
+			}
+			client := http.Client{
+				Timeout: 1 * time.Second,
+			}
+			client.Post("http://reflink:8080/update", "application/json", bytes.NewBuffer(json_data))
+		}
 	}
 }
