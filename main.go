@@ -464,6 +464,9 @@ func processVolumeSnapshot(clientset *kubernetes.Clientset, dClient dynamic.Inte
 			log.Print(cmd.String())
 
 			labels := lpv.GetLabels()
+			if labels == nil {
+				labels = map[string]string{}
+			}
 			for k, v := range vs.labels {
 				labels[k] = v
 			}
