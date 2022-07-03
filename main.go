@@ -91,31 +91,20 @@ func getLocalPVs(clientset *kubernetes.Clientset) []v1.PersistentVolume {
 	return ret
 }
 
-func startsWith(a, b string) bool {
-	if len(a) < len(b) {
-		return false
-	}
-	if a[:len(b)] == b {
-		return true
-	}
-	return false
-}
 func deletePv(clientset *kubernetes.Clientset, pv v1.PersistentVolume) {
-	if startsWith(pv.Spec.Local.Path, config.RootPath) {
+	if strings.HasPrefix(pv.Spec.Local.Path, config.RootPath) {
 		if _, err := os.Stat(pv.Spec.Local.Path); os.IsNotExist(err) {
 			return
 		}
 
-		fmt.Printf(":: %s[%s] - %s\n", pv.ObjectMeta.Name, pv.ObjectMeta.Labels["source"], pv.Status.Phase)
+		log.Printf("Deleting pv %s at %s", pv.ObjectMeta.Name, pv.Spec.Local.Path)
 		clientset.CoreV1().PersistentVolumes().Delete(context.TODO(), pv.ObjectMeta.Name, metav1.DeleteOptions{})
 
-		cmd := exec.Command("rm", "-rf", pv.Spec.Local.Path)
-		cmd.Start()
-		cmd.Wait()
+		os.RemoveAll(pv.Spec.Local.Path)
 	}
 }
 
-func process(clientset *kubernetes.Clientset) {
+func process(clientset *kubernetes.Clientset, dClient dynamic.Interface) {
 	pvs := getPv(clientset)
 
 	for _, pv := range pvs {
@@ -128,17 +117,60 @@ func process(clientset *kubernetes.Clientset) {
 	for _, item := range items {
 		if item.Status.Phase == "Pending" {
 			fmt.Printf("  :: %s\n", item.ObjectMeta.Name)
-			if item.Spec.StorageClassName == nil || *item.Spec.StorageClassName != config.StorageClass {
+			if item.Spec.StorageClassName == nil || (*item.Spec.StorageClassName != config.StorageClass && *item.Spec.StorageClassName != "reflink0.5") {
 				log.Printf("Wrong storageclass for me '%s' needs '%s'", *item.Spec.StorageClassName, config.StorageClass)
 				continue
 			}
 			if item.Spec.DataSource == nil {
-				log.Printf("No datasource, this is odd")
+				log.Printf("No datasource in pvc: %s, this is odd", item.Name)
+				log.Printf("%+v", item)
 				continue
 			}
+			labels := map[string]string{}
 
 			source := item.Spec.DataSource.Name
-			sourcePath := filepath.Join(config.SnapshotPath, source)
+			var sourcePath string
+			if item.Spec.DataSource.Kind == "VolumeSnapshot" {
+				if *item.Spec.StorageClassName == "reflink0.5" {
+					sourcePath = filepath.Join(config.SnapshotPath, source)
+
+					byteValue, err := ioutil.ReadFile(sourcePath + ".meta")
+					if err != nil {
+						log.Print(err)
+						continue
+					}
+
+					var meta struct {
+						Type string `json:"type"`
+					}
+					json.Unmarshal(byteValue, &meta)
+
+					if meta.Type == "" {
+						log.Printf("No meta type found for %s, aborting...", sourcePath)
+						continue
+					}
+
+					labels["application"] = meta.Type
+
+				} else {
+					list := getVolumeSnapshotContents(dClient)
+					for _, item := range list {
+
+						log.Print(item.Name)
+						if item.Spec.VolumeSnapshotClassName == config.StorageClass && item.Spec.VolumeSnapshotRef.Name == source {
+							sourcePath = item.Spec.Source.VolumeHandle
+							labels = item.Labels
+							break
+						}
+					}
+				}
+			} else {
+				log.Printf("Unknown DataSource.Kind %s", item.Spec.DataSource.Kind)
+				continue
+			}
+			if sourcePath == "" {
+				continue
+			}
 			fmt.Printf("Aiming to snapshot :: %s\n", sourcePath)
 			created := false
 			for _, pv := range pvs {
@@ -170,10 +202,8 @@ func process(clientset *kubernetes.Clientset) {
 			volumeFile := v1.PersistentVolumeFilesystem
 			pv.Spec.VolumeMode = &volumeFile
 			pv.ObjectMeta = metav1.ObjectMeta{
-				Name: guid.String(),
-				Labels: map[string]string{
-					"source": source,
-				},
+				Name:   guid.String(),
+				Labels: labels,
 			}
 			pv.Spec.Capacity = v1.ResourceList{
 				v1.ResourceName(v1.ResourceStorage): *resource.NewQuantity(int64(3000000000000), resource.BinarySI),
@@ -279,9 +309,52 @@ func getDumpsCSV(w http.ResponseWriter, r *http.Request) {
 var config Config
 
 type VolumeSnapshotContent struct {
+	Name       string
+	Kind       string
+	APIVersion string
+	Labels     map[string]string
+
+	Spec struct {
+		VolumeSnapshotClassName string
+
+		VolumeSnapshotRef struct {
+			Name      string
+			Namespace string
+		}
+		Source struct {
+			VolumeHandle string
+		}
+	}
 }
 
-func getUVolumeSnapshotContent(dClient dynamic.Interface) *unstructured.UnstructuredList {
+func getVolumeSnapshotContents(dClient dynamic.Interface) []VolumeSnapshotContent {
+	ret := []VolumeSnapshotContent{}
+
+	list := getUVolumeSnapshotContents(dClient)
+	for _, uvcs := range list.Items {
+		vcs := VolumeSnapshotContent{}
+
+		vcs.Name = uvcs.GetName()
+		vcs.Kind = uvcs.GetKind()
+		vcs.Labels = uvcs.GetLabels()
+		vcs.APIVersion = uvcs.GetAPIVersion()
+
+		vcs.Spec.VolumeSnapshotClassName = uvcs.Object["spec"].(map[string]interface{})["volumeSnapshotClassName"].(string)
+		if uvcs.Object["spec"].(map[string]interface{})["volumeSnapshotRef"] != nil {
+			vcs.Spec.VolumeSnapshotRef.Name = uvcs.Object["spec"].(map[string]interface{})["volumeSnapshotRef"].(map[string]interface{})["name"].(string)
+			vcs.Spec.VolumeSnapshotRef.Namespace = uvcs.Object["spec"].(map[string]interface{})["volumeSnapshotRef"].(map[string]interface{})["namespace"].(string)
+		}
+		if uvcs.Object["spec"].(map[string]interface{})["source"] != nil {
+			vcs.Spec.Source.VolumeHandle = uvcs.Object["spec"].(map[string]interface{})["source"].(map[string]interface{})["volumeHandle"].(string)
+		}
+
+		ret = append(ret, vcs)
+
+	}
+
+	return ret
+}
+func getUVolumeSnapshotContents(dClient dynamic.Interface) *unstructured.UnstructuredList {
 	volumesnapshotcontentRes := schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshotcontents"}
 
 	// VSContent := &unstructured.Unstructured{}
@@ -316,12 +389,8 @@ func getUVolumeSnapshotContent(dClient dynamic.Interface) *unstructured.Unstruct
 	return list
 }
 
-func getVolumeSnapshots(clientset *kubernetes.Clientset, dClient dynamic.Interface) {
-
-	namespace := "sandbox-kgusw"
-
+func getUVolumeSnapshots(dClient dynamic.Interface, namespace string) *unstructured.UnstructuredList {
 	volumesnapshotRes := schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}
-	volumesnapshotcontentRes := schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshotcontents"}
 
 	// List VolumeSnapshots
 	list, err := dClient.Resource(volumesnapshotRes).Namespace(namespace).List(context.TODO(), metav1.ListOptions{})
@@ -329,103 +398,125 @@ func getVolumeSnapshots(clientset *kubernetes.Clientset, dClient dynamic.Interfa
 		panic(err)
 	}
 
-	for _, d := range list.Items {
-		type VolumeSnapshot struct {
-			name string
-			spec struct {
-				volumeSnapshotClassName string
-				source                  struct {
-					persistentVolumeClaimName string
-				}
+	return list
+}
+
+type VolumeSnapshot struct {
+	name            string
+	namespace       string
+	labels          map[string]string
+	resourceVersion string
+	spec            struct {
+		volumeSnapshotClassName string
+		source                  struct {
+			persistentVolumeClaimName string
+		}
+	}
+	status struct {
+		readyToUse                     bool
+		boundVolumeSnapshotContentName string
+		creationTime                   string
+	}
+}
+
+func processVolumeSnapshot(clientset *kubernetes.Clientset, dClient dynamic.Interface, vs VolumeSnapshot) {
+	volumesnapshotcontentRes := schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshotcontents"}
+	volumesnapshotRes := schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}
+
+	// Check if already created
+	if vs.status.boundVolumeSnapshotContentName != "" {
+		return
+	}
+
+	lpvs := getLocalPVs(clientset)
+	for _, lpv := range lpvs {
+		if lpv.Spec.ClaimRef.Name == vs.spec.source.persistentVolumeClaimName {
+			name := vs.name + uuid.New().String()
+			destination := filepath.Join(config.SnapshotPath, name)
+
+			cmd := exec.Command("cp", "-rp", "--reflink=always", lpv.Spec.Local.Path, destination)
+			cmd.Start()
+			cmd.Wait()
+			log.Print(cmd.String())
+
+			labels := lpv.GetLabels()
+			for k, v := range vs.labels {
+				labels[k] = v
 			}
-			status struct {
-				readyToUse                     bool
-				boundVolumeSnapshotContentName string
-				creationTime                   string
+
+			VSContent := &unstructured.Unstructured{}
+			VSContent.SetUnstructuredContent(map[string]interface{}{
+				"apiVersion": "snapshot.storage.k8s.io/v1",
+				"kind":       "VolumeSnapshotContent",
+				"metadata": map[string]interface{}{
+					"name":   name,
+					"labels": labels,
+				},
+				"spec": map[string]interface{}{
+					"deletionPolicy": "Delete",
+					"driver":         config.StorageClass,
+					"source": map[string]interface{}{
+						"volumeHandle": destination,
+					},
+					"sourceVolumeMode":        "Filesystem",
+					"volumeSnapshotClassName": config.StorageClass,
+					"volumeSnapshotRef": map[string]interface{}{
+						"name":      vs.name,
+						"namespace": vs.namespace,
+					},
+				},
+			})
+			_, err := dClient.Resource(volumesnapshotcontentRes).Create(context.TODO(), VSContent, metav1.CreateOptions{})
+			if err != nil {
+				panic(err)
+			}
+
+			mdb := &unstructured.Unstructured{}
+			mdb.SetUnstructuredContent(map[string]interface{}{
+				"apiVersion": "snapshot.storage.k8s.io/v1",
+				"kind":       "VolumeSnapshot",
+				"metadata": map[string]interface{}{
+					"name":            vs.name,
+					"namespace":       vs.namespace,
+					"resourceVersion": vs.resourceVersion,
+				},
+				"status": map[string]interface{}{
+					"readyToUse":                     true,
+					"boundVolumeSnapshotContentName": name,
+					"creationTime":                   time.Now().Format(time.RFC3339),
+				},
+			})
+
+			_, err = dClient.Resource(volumesnapshotRes).Namespace(vs.namespace).UpdateStatus(context.TODO(), mdb, metav1.UpdateOptions{})
+			if err != nil {
+				panic(err)
 			}
 		}
+	}
+}
 
+func processVolumeSnapshots(clientset *kubernetes.Clientset, dClient dynamic.Interface) {
+
+	namespace := "sandbox-kgusw"
+
+	list := getUVolumeSnapshots(dClient, namespace)
+
+	for _, d := range list.Items {
 		vs := VolumeSnapshot{}
+		vs.labels = d.GetLabels()
 		vs.name = d.GetName()
+		vs.namespace = d.GetNamespace()
 		vs.spec.volumeSnapshotClassName = d.Object["spec"].(map[string]interface{})["volumeSnapshotClassName"].(string)
 		vs.spec.source.persistentVolumeClaimName = d.Object["spec"].(map[string]interface{})["source"].(map[string]interface{})["persistentVolumeClaimName"].(string)
+		vs.spec.source.persistentVolumeClaimName = d.Object["spec"].(map[string]interface{})["source"].(map[string]interface{})["persistentVolumeClaimName"].(string)
+		vs.resourceVersion = d.GetResourceVersion()
 		if d.Object["status"] != nil {
 			vs.status.boundVolumeSnapshotContentName = d.Object["status"].(map[string]interface{})["boundVolumeSnapshotContentName"].(string)
 			vs.status.readyToUse = d.Object["status"].(map[string]interface{})["readyToUse"].(bool)
 			vs.status.creationTime = d.Object["status"].(map[string]interface{})["creationTime"].(string)
 		}
 
-		log.Printf("%+v", vs)
-
-		// Check if already created
-		if vs.status.boundVolumeSnapshotContentName != "" {
-			continue
-		}
-
-		lpvs := getLocalPVs(clientset)
-		for _, lpv := range lpvs {
-			if lpv.Spec.ClaimRef.Name == vs.spec.source.persistentVolumeClaimName {
-				log.Print("Yay we have that one, we should do stuff")
-				name := vs.name + uuid.New().String()
-				destination := filepath.Join(config.SnapshotPath, name)
-
-				cmd := exec.Command("cp", "-rp", "--reflink=always", lpv.Spec.Local.Path, destination)
-				cmd.Start()
-				cmd.Wait()
-				log.Print(cmd.String())
-
-				VSContent := &unstructured.Unstructured{}
-				VSContent.SetUnstructuredContent(map[string]interface{}{
-					"apiVersion": "snapshot.storage.k8s.io/v1",
-					"kind":       "VolumeSnapshotContent",
-					"metadata": map[string]interface{}{
-						"name": name,
-						"labels": map[string]interface{}{
-							"node": os.Getenv("NODE"),
-						},
-					},
-					"spec": map[string]interface{}{
-						"deletionPolicy": "Delete",
-						"driver":         config.StorageClass,
-						"source": map[string]interface{}{
-							"volumeHandle": lpv.Name,
-						},
-						"sourceVolumeMode":        "Filesystem",
-						"volumeSnapshotClassName": config.StorageClass,
-						"volumeSnapshotRef": map[string]interface{}{
-							"name":      vs.name,
-							"namespace": d.GetNamespace(),
-						},
-					},
-				})
-				_, err = dClient.Resource(volumesnapshotcontentRes).Create(context.TODO(), VSContent, metav1.CreateOptions{})
-				if err != nil {
-					panic(err)
-				}
-
-				mdb := &unstructured.Unstructured{}
-				mdb.SetUnstructuredContent(map[string]interface{}{
-					"apiVersion": "snapshot.storage.k8s.io/v1",
-					"kind":       "VolumeSnapshot",
-					"metadata": map[string]interface{}{
-						"name":            d.GetName(),
-						"namespace":       d.GetNamespace(),
-						"resourceVersion": d.GetResourceVersion(),
-					},
-					"status": map[string]interface{}{
-						"readyToUse":                     true,
-						"boundVolumeSnapshotContentName": name,
-						"creationTime":                   time.Now().Format(time.RFC3339),
-					},
-				})
-
-				_, err := dClient.Resource(volumesnapshotRes).Namespace(d.GetNamespace()).UpdateStatus(context.TODO(), mdb, metav1.UpdateOptions{})
-				if err != nil {
-					panic(err)
-				}
-			}
-		}
-
+		processVolumeSnapshot(clientset, dClient, vs)
 	}
 }
 
@@ -445,10 +536,7 @@ func CleanDumps(clientset *kubernetes.Clientset) {
 			}
 		}
 		if !found {
-			cmd := exec.Command("rm", "-rf", filepath.Join(config.RootPath, f.Name()))
-			cmd.Start()
-			cmd.Wait()
-
+			os.RemoveAll(filepath.Join(config.RootPath, f.Name()))
 		}
 	}
 
@@ -460,7 +548,7 @@ func CleanSnapshots(clientset *kubernetes.Clientset, dClient dynamic.Interface) 
 		log.Fatal(err)
 	}
 
-	volumeSnapshtoContent := getUVolumeSnapshotContent(dClient)
+	vscs := getVolumeSnapshotContents(dClient)
 	for _, f := range files {
 		if strings.HasSuffix(f.Name(), ".meta") {
 			// Old style meta file, ignore for now
@@ -472,17 +560,15 @@ func CleanSnapshots(clientset *kubernetes.Clientset, dClient dynamic.Interface) 
 		}
 
 		found := false
-		for _, vsc := range volumeSnapshtoContent.Items {
-			if vsc.GetName() == f.Name() {
+		for _, vsc := range vscs {
+			if vsc.Spec.Source.VolumeHandle == filepath.Join(config.SnapshotPath, f.Name()) {
 				found = true
 			}
 		}
 
 		if !found {
 			log.Printf("Deleting '%s'", f.Name())
-			cmd := exec.Command("rm", "-rf", filepath.Join(config.SnapshotPath, f.Name()))
-			cmd.Start()
-			cmd.Wait()
+			os.RemoveAll(filepath.Join(config.SnapshotPath, f.Name()))
 		}
 
 	}
@@ -524,7 +610,7 @@ func main() {
 		time.Sleep(10 * time.Second)
 		CleanDumps(clientset)
 		CleanSnapshots(clientset, dClient)
-		process(clientset)
-		getVolumeSnapshots(clientset, dClient)
+		process(clientset, dClient)
+		processVolumeSnapshots(clientset, dClient)
 	}
 }
