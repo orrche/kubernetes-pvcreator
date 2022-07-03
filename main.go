@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -31,6 +32,7 @@ type Config struct {
 	RootPath     string `yaml:"RootPath"`
 	StorageClass string `yaml:"StorageClass"`
 	SnapshotPath string `yaml:"SnapshotPath"`
+	ReportURL    string `yaml:"ReportURL"`
 	Nodes        []struct {
 		Hostname string `yaml:"Hostname"` // Hostname whatever the node is named in kubernetes
 		Host     string `yaml:"Host"`     // Host whatever the node is reached at with ssh
@@ -117,20 +119,25 @@ func process(clientset *kubernetes.Clientset, dClient dynamic.Interface) {
 	for _, item := range items {
 		if item.Status.Phase == "Pending" {
 			fmt.Printf("  :: %s\n", item.ObjectMeta.Name)
-			if item.Spec.StorageClassName == nil || (*item.Spec.StorageClassName != config.StorageClass && *item.Spec.StorageClassName != "reflink0.5") {
+			if item.Spec.StorageClassName == nil || (*item.Spec.StorageClassName != config.StorageClass && *item.Spec.StorageClassName != "reflink0.5" && *item.Spec.StorageClassName != "manual") {
 				log.Printf("Wrong storageclass for me '%s' needs '%s'", *item.Spec.StorageClassName, config.StorageClass)
 				continue
 			}
+			var source string
 			if item.Spec.DataSource == nil {
 				log.Printf("No datasource in pvc: %s, this is odd", item.Name)
 				log.Printf("%+v", item)
-				continue
+
+				if *item.Spec.StorageClassName != "manual" {
+					continue
+				}
+			} else {
+				source = item.Spec.DataSource.Name
 			}
 			labels := map[string]string{}
 
-			source := item.Spec.DataSource.Name
 			var sourcePath string
-			if item.Spec.DataSource.Kind == "VolumeSnapshot" {
+			if *item.Spec.StorageClassName == "manual" || item.Spec.DataSource.Kind == "VolumeSnapshot" {
 				if *item.Spec.StorageClassName == "reflink0.5" {
 					sourcePath = filepath.Join(config.SnapshotPath, source)
 
@@ -152,8 +159,34 @@ func process(clientset *kubernetes.Clientset, dClient dynamic.Interface) {
 
 					labels["application"] = meta.Type
 
+				} else if *item.Spec.StorageClassName == "manual" {
+					if item.Spec.Selector == nil {
+						// Really bad idea to use manual
+						continue
+					}
+					source = item.Spec.Selector.MatchLabels["source"]
+					sourcePath = filepath.Join(config.SnapshotPath, source)
+
+					byteValue, err := ioutil.ReadFile(sourcePath + ".meta")
+					if err != nil {
+						log.Print(err)
+						continue
+					}
+
+					var meta struct {
+						Type string `json:"type"`
+					}
+					json.Unmarshal(byteValue, &meta)
+
+					if meta.Type == "" {
+						log.Printf("No meta type found for %s, aborting...", sourcePath)
+						continue
+					}
+
+					labels["application"] = meta.Type
+
 				} else {
-					list := getVolumeSnapshotContents(dClient)
+					list := getLocalVolumeSnapshotContents(dClient)
 					for _, item := range list {
 
 						log.Print(item.Name)
@@ -238,69 +271,59 @@ func process(clientset *kubernetes.Clientset, dClient dynamic.Interface) {
 
 }
 
+var gdClient dynamic.Interface
+
 func dumps() ([]Dump, error) {
 	dump := []Dump{}
+	if gdClient == nil {
+		return dump, fmt.Errorf("not yet initialized")
+	}
 
-	for _, node := range config.Nodes {
-		cmd := exec.Command("ssh", node.Host, "ls", config.RootPath+"/dump/")
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			continue
-		}
+	for _, vc := range getLocalVolumeSnapshotContents(gdClient) {
+		d := Dump{}
+		d.Name = vc.Spec.VolumeSnapshotRef.Name
+		d.Type = vc.Labels["application"]
+		dump = append(dump, d)
+	}
 
-		for _, folder := range strings.Split(string(output), "\n") {
-			log.Print(folder)
-			d := Dump{}
-			d.Name = folder
-			d.Type = "unknown"
+	files, err := ioutil.ReadDir(config.SnapshotPath)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-			cmd := exec.Command("ssh", node.Host, "cat", config.RootPath+"/dump/"+folder+".meta")
-			metaInfo, err := cmd.CombinedOutput()
+	for _, f := range files {
+		if strings.HasSuffix(f.Name(), ".meta") {
+			byteValue, err := ioutil.ReadFile(filepath.Join(config.SnapshotPath, f.Name()))
 			if err != nil {
+				log.Print(err)
 				continue
 			}
 
-			type dumpMeta struct {
+			var meta struct {
 				Type string `json:"type"`
 			}
+			json.Unmarshal(byteValue, &meta)
 
-			dm := dumpMeta{}
-			json.Unmarshal(metaInfo, &dm)
-
-			d.Type = dm.Type
+			d := Dump{}
+			d.Name = f.Name()[:len(f.Name())-5]
+			d.Type = meta.Type
 
 			dump = append(dump, d)
 		}
 	}
+
 	return dump, nil
 }
 
-func getDumpsJSON(w http.ResponseWriter, r *http.Request) {
-
-	type Result struct {
-		Dumps []Dump `json:"dumps"`
-	}
-
-	res := Result{}
-	var err error
-	res.Dumps, err = dumps()
-	if err != nil {
-		panic(err)
-	}
-
-	b, err := json.Marshal(res)
-	if err != nil {
-		panic(err)
-	}
-
-	w.Write(b)
-}
-
 func getDumpsCSV(w http.ResponseWriter, r *http.Request) {
-	dumps, err := dumps()
-	if err != nil {
-		panic(err)
+	dumps := []Dump{}
+
+	for _, dump := range dumpCache.dumps {
+		if dump.Creation.After(time.Now().Add(-2 * time.Minute)) {
+			dumps = append(dumps, dump.Dumps...)
+		}
 	}
+
 	for _, dump := range dumps {
 		fmt.Fprintf(w, "%s,%s\n", dump.Name, dump.Type)
 	}
@@ -496,27 +519,30 @@ func processVolumeSnapshot(clientset *kubernetes.Clientset, dClient dynamic.Inte
 }
 
 func processVolumeSnapshots(clientset *kubernetes.Clientset, dClient dynamic.Interface) {
+	namespaces, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		panic(err)
+	}
+	for _, namespace := range namespaces.Items {
+		list := getUVolumeSnapshots(dClient, namespace.GetName())
 
-	namespace := "sandbox-kgusw"
+		for _, d := range list.Items {
+			vs := VolumeSnapshot{}
+			vs.labels = d.GetLabels()
+			vs.name = d.GetName()
+			vs.namespace = d.GetNamespace()
+			vs.spec.volumeSnapshotClassName = d.Object["spec"].(map[string]interface{})["volumeSnapshotClassName"].(string)
+			vs.spec.source.persistentVolumeClaimName = d.Object["spec"].(map[string]interface{})["source"].(map[string]interface{})["persistentVolumeClaimName"].(string)
+			vs.spec.source.persistentVolumeClaimName = d.Object["spec"].(map[string]interface{})["source"].(map[string]interface{})["persistentVolumeClaimName"].(string)
+			vs.resourceVersion = d.GetResourceVersion()
+			if d.Object["status"] != nil {
+				vs.status.boundVolumeSnapshotContentName = d.Object["status"].(map[string]interface{})["boundVolumeSnapshotContentName"].(string)
+				vs.status.readyToUse = d.Object["status"].(map[string]interface{})["readyToUse"].(bool)
+				vs.status.creationTime = d.Object["status"].(map[string]interface{})["creationTime"].(string)
+			}
 
-	list := getUVolumeSnapshots(dClient, namespace)
-
-	for _, d := range list.Items {
-		vs := VolumeSnapshot{}
-		vs.labels = d.GetLabels()
-		vs.name = d.GetName()
-		vs.namespace = d.GetNamespace()
-		vs.spec.volumeSnapshotClassName = d.Object["spec"].(map[string]interface{})["volumeSnapshotClassName"].(string)
-		vs.spec.source.persistentVolumeClaimName = d.Object["spec"].(map[string]interface{})["source"].(map[string]interface{})["persistentVolumeClaimName"].(string)
-		vs.spec.source.persistentVolumeClaimName = d.Object["spec"].(map[string]interface{})["source"].(map[string]interface{})["persistentVolumeClaimName"].(string)
-		vs.resourceVersion = d.GetResourceVersion()
-		if d.Object["status"] != nil {
-			vs.status.boundVolumeSnapshotContentName = d.Object["status"].(map[string]interface{})["boundVolumeSnapshotContentName"].(string)
-			vs.status.readyToUse = d.Object["status"].(map[string]interface{})["readyToUse"].(bool)
-			vs.status.creationTime = d.Object["status"].(map[string]interface{})["creationTime"].(string)
+			processVolumeSnapshot(clientset, dClient, vs)
 		}
-
-		processVolumeSnapshot(clientset, dClient, vs)
 	}
 }
 
@@ -548,7 +574,7 @@ func CleanSnapshots(clientset *kubernetes.Clientset, dClient dynamic.Interface) 
 		log.Fatal(err)
 	}
 
-	vscs := getVolumeSnapshotContents(dClient)
+	vscs := getLocalVolumeSnapshotContents(dClient)
 	for _, f := range files {
 		if strings.HasSuffix(f.Name(), ".meta") {
 			// Old style meta file, ignore for now
@@ -575,6 +601,74 @@ func CleanSnapshots(clientset *kubernetes.Clientset, dClient dynamic.Interface) 
 
 }
 
+func getLocalVolumeSnapshotContents(dClient dynamic.Interface) []VolumeSnapshotContent {
+	vcs := getVolumeSnapshotContents(dClient)
+	ret := []VolumeSnapshotContent{}
+
+	for _, vc := range vcs {
+		if vc.Spec.VolumeSnapshotClassName != config.StorageClass {
+			continue
+		}
+		if _, err := os.Stat(vc.Spec.Source.VolumeHandle); os.IsNotExist(err) {
+			continue
+		}
+
+		ret = append(ret, vc)
+	}
+	return ret
+}
+
+type Report struct {
+	Dumps    []Dump `json:"dump"`
+	Provider string `json:"prodiver"`
+	Creation time.Time
+}
+
+func RepportVolumeContent(dClient dynamic.Interface) {
+	rep := Report{}
+	var err error
+	rep.Provider, err = os.Hostname()
+	if err != nil {
+		return
+	}
+	rep.Dumps, err = dumps()
+	if err != nil {
+		return
+	}
+
+	json_data, err := json.Marshal(rep)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = http.Post(config.ReportURL+"/update", "application/json",
+		bytes.NewBuffer(json_data))
+
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func updateDumps(w http.ResponseWriter, r *http.Request) {
+	data, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		log.Panic(err)
+	}
+
+	rep := Report{}
+
+	json.Unmarshal(data, &rep)
+	rep.Creation = time.Now()
+	dumpCache.dumps[rep.Provider] = rep
+
+	log.Printf("%+v", dumpCache)
+}
+
+var dumpCache struct {
+	dumps map[string]Report
+}
+
 func main() {
 	kConfig, err := rest.InClusterConfig()
 	if err != nil {
@@ -589,6 +683,7 @@ func main() {
 	if err != nil {
 		log.Panic(err)
 	}
+	gdClient = dClient
 	yamlFile, err := ioutil.ReadFile("conf.yml")
 	if err != nil {
 		log.Panic(err)
@@ -598,19 +693,20 @@ func main() {
 		log.Panic(err)
 	}
 
-	cont := true
-	go func() {
-		http.HandleFunc("/getDumps.json", getDumpsJSON)
+	if os.Getenv("REFLINKMASTER") == "true" {
+		log.Print("MASTER MODE")
+		dumpCache.dumps = map[string]Report{}
+		http.HandleFunc("/update", updateDumps)
 		http.HandleFunc("/getDumps.csv", getDumpsCSV)
 		http.ListenAndServe(":8080", nil)
-		cont = false
-	}()
-
-	for cont {
-		time.Sleep(10 * time.Second)
-		CleanDumps(clientset)
-		CleanSnapshots(clientset, dClient)
-		process(clientset, dClient)
-		processVolumeSnapshots(clientset, dClient)
+	} else {
+		for {
+			CleanDumps(clientset)
+			CleanSnapshots(clientset, dClient)
+			process(clientset, dClient)
+			processVolumeSnapshots(clientset, dClient)
+			RepportVolumeContent(dClient)
+			time.Sleep(10 * time.Second)
+		}
 	}
 }
