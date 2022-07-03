@@ -202,6 +202,7 @@ func process(clientset *kubernetes.Clientset, dClient dynamic.Interface) {
 				continue
 			}
 			if sourcePath == "" {
+				log.Print("sourcePath not set, aborting")
 				continue
 			}
 			fmt.Printf("Aiming to snapshot :: %s\n", sourcePath)
