@@ -692,6 +692,20 @@ func main() {
 	if err != nil {
 		log.Panic(err)
 	}
+	if _, err := os.Stat(config.RootPath); os.IsNotExist(err) {
+		log.Printf("Creating directory %s", config.RootPath)
+		err := os.MkdirAll(config.RootPath, os.ModePerm)
+		if err != nil {
+			panic(err)
+		}
+	}
+	if _, err := os.Stat(config.SnapshotPath); os.IsNotExist(err) {
+		log.Printf("Creating directory %s", config.SnapshotPath)
+		err := os.MkdirAll(config.SnapshotPath, os.ModePerm)
+		if err != nil {
+			panic(err)
+		}
+	}
 
 	if os.Getenv("REFLINKMASTER") == "true" {
 		log.Print("MASTER MODE")
