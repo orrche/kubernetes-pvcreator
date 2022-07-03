@@ -85,7 +85,7 @@ func getLocalPVs(clientset *kubernetes.Clientset) []v1.PersistentVolume {
 	pvs := getPv(clientset)
 
 	for _, pv := range pvs {
-		if _, err := os.Stat(config.RootPath + pv.Name); !os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(config.RootPath, pv.Name)); !os.IsNotExist(err) {
 			ret = append(ret, pv)
 		}
 	}
