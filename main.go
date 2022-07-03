@@ -562,6 +562,7 @@ func CleanDumps(clientset *kubernetes.Clientset) {
 			}
 		}
 		if !found {
+			log.Printf("Deleting '%s'", filepath.Join(config.RootPath, f.Name()))
 			os.RemoveAll(filepath.Join(config.RootPath, f.Name()))
 		}
 	}
