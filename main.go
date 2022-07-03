@@ -95,12 +95,11 @@ func getLocalPVs(clientset *kubernetes.Clientset) []v1.PersistentVolume {
 
 func deletePv(clientset *kubernetes.Clientset, pv v1.PersistentVolume) {
 	if strings.HasPrefix(pv.Spec.Local.Path, config.RootPath) {
+		log.Printf("Deleting pv %s at %s", pv.ObjectMeta.Name, pv.Spec.Local.Path)
+		clientset.CoreV1().PersistentVolumes().Delete(context.TODO(), pv.ObjectMeta.Name, metav1.DeleteOptions{})
 		if _, err := os.Stat(pv.Spec.Local.Path); os.IsNotExist(err) {
 			return
 		}
-
-		log.Printf("Deleting pv %s at %s", pv.ObjectMeta.Name, pv.Spec.Local.Path)
-		clientset.CoreV1().PersistentVolumes().Delete(context.TODO(), pv.ObjectMeta.Name, metav1.DeleteOptions{})
 
 		os.RemoveAll(pv.Spec.Local.Path)
 	}
