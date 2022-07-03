@@ -7,6 +7,6 @@ RUN adduser -m pvcreator
 WORKDIR /home/pvcreator/conf.yml
 ADD kubernetes-pvcreator /kubernetes-pvcreator
 
-USER pvcreator
+# USER pvcreator
 
 CMD ["/kubernetes-pvcreator"]
