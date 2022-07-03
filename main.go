@@ -109,7 +109,7 @@ func process(clientset *kubernetes.Clientset, dClient dynamic.Interface) {
 	pvs := getPv(clientset)
 
 	for _, pv := range pvs {
-		if pv.Status.Phase == "Failed" {
+		if pv.Status.Phase == "Failed" && pv.Spec.StorageClassName == config.StorageClass {
 			deletePv(clientset, pv)
 		}
 	}
