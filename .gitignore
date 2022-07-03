@@ -1,0 +1,3 @@
+*.swp
+/kubernetes-pvcreator
+reflink.docker
