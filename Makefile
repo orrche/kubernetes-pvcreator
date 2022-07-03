@@ -42,4 +42,4 @@ test:
 cleantest:
 	kubectl delete -f - < docker/test/test.yml > /dev/null || true
 clean: cleantest
-	rm -f registry.touch activate.touch image.touch kubernetes-pvcreator
+	rm -f registry.touch activate.touch image.touch kubernetes-pvcreator docker.digest
