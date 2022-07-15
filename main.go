@@ -453,7 +453,7 @@ func processVolumeSnapshot(clientset *kubernetes.Clientset, dClient dynamic.Inte
 
 	lpvs := getLocalPVs(clientset)
 	for _, lpv := range lpvs {
-		if lpv.Spec.ClaimRef.Name == vs.spec.source.persistentVolumeClaimName {
+		if lpv.Spec.ClaimRef.Name == vs.spec.source.persistentVolumeClaimName && lpv.Namespace == vs.namespace {
 			name := vs.name + uuid.New().String()
 			destination := filepath.Join(config.SnapshotPath, name)
 
